@@ -512,6 +512,12 @@ int main(int argc, char *argv[])
   } // end of phases
   
   MPI_Barrier(MPI_COMM_WORLD);
+
+#if defined(DONT_CREATE_DIAG_FILES)
+  std::cout << "Modularity: " << currMod << std::endl;
+#else
+  ofs << "Modularity: " << currMod << std::endl;
+#endif
   
   double tot_time = 0.0;
   MPI_Reduce(&total, &tot_time, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
