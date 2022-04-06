@@ -43,6 +43,8 @@ void PrintRssGBytes() {
   fprintf(stderr, "current RSS memory: %lf, max RSS memory: %lf\n",
           ParseProcSelfRssBytes() / 1024.0 / 1024.0 / 1024.0,
           GetMaxMem() / 1024.0 / 1024.0);
+  ofs << "current RSS memory: " << ParseProcSelfRssBytes() / 1024.0 / 1024.0 / 1024.0
+    << ", max RSS memory: " << GetMaxMem() / 1024.0 / 1024.0 << "\n";
 }
 
 GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &dg,
