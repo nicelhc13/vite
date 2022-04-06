@@ -91,11 +91,12 @@ void loadSimpleFileUn(Graph *&g, const std::string &fileName, bool indexOneBased
         iss >> v0 >> v1 >> w;
     else
         iss >> v0 >> v1;
-
+#if 0
     if (indexOneBased) {
         v0--; 
         v1--;
     }
+#endif
 
     if (v0 > maxVertex)
       maxVertex = v0;
@@ -134,10 +135,12 @@ void loadSimpleFileUn(Graph *&g, const std::string &fileName, bool indexOneBased
     else
         iss >> v0 >> v1;
 
+#if 0
     if (indexOneBased) {
         v0--; 
         v1--;
     }
+#endif
      
     if (wtype == ONE_WEIGHT)
         w = 1.0;

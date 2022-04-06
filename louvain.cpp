@@ -4,6 +4,47 @@
 
 #include "locks.hpp"
 
+#include <iostream>
+#include <sys/sysinfo.h>
+#include <unistd.h>
+#include <sys/resource.h>
+#include <regex>
+
+uint64_t ParseProcSelfRssBytes() {
+  static std::regex kRssRegex("^Rss\\w+:\\s+([0-9]+) kB");
+  std::ifstream proc_self("/proc/self/status");
+
+  uint32_t rss_vals = 3;
+  uint64_t total_mem = 0;
+  std::string line;
+  while (std::getline(proc_self, line) && rss_vals > 0) {
+    std::smatch sub_match;
+    if (!std::regex_match(line,sub_match, kRssRegex)) {
+      continue;
+    }
+    std::string val = sub_match[1];
+    total_mem += std::strtol(val.c_str(), nullptr, 0);
+    rss_vals -= 1;
+  }
+  if (rss_vals != 0) {
+    std::cerr << "parsing /proc/self/status for memory failed\n";
+  }
+
+  return total_mem * 1024;
+}
+
+long GetMaxMem() {
+  struct rusage rusage;
+  getrusage(RUSAGE_SELF, &rusage);
+  return rusage.ru_maxrss;
+}
+
+void PrintRssGBytes() {
+  fprintf(stderr, "current RSS memory: %lf, max RSS memory: %lf\n",
+          ParseProcSelfRssBytes() / 1024.0 / 1024.0 / 1024.0,
+          GetMaxMem() / 1024.0 / 1024.0);
+}
+
 GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &dg,
         size_t &ssz, size_t &rsz, 
         std::vector<GraphElem> &ssizes, std::vector<GraphElem> &rsizes, 
@@ -112,6 +153,7 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
             }
         }
     }
+
     if (!ETLocalOrRemote) {
         MPI_Allreduce(MPI_IN_PLACE, &vc_count, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
         GraphWeight perc = 100.0 * ((GraphWeight)(tnv-vc_count)/(GraphWeight)tnv);
@@ -424,12 +466,19 @@ GraphWeight distLouvainMethod(const int me, const int nprocs,
   return prevMod;
 } // distLouvainMethod with early termination probabilities
 
+// TODO(lhc): Target
+// Similar with original katana Louvain.
+// 1) setup mirrors
+// 2) get remote cluster information
+// 3) find neighbors and calculate louvain clustering (blocked-oec)
+// 4) exchange that info
+// 5) update local cluster info
 GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &dg,
         size_t &ssz, size_t &rsz, 
         std::vector<GraphElem> &ssizes, std::vector<GraphElem> &rsizes, 
         std::vector<GraphElem> &svdata, std::vector<GraphElem> &rvdata,
         CommunityVector &cvect, const GraphWeight lower, const GraphWeight thresh, 
-        int& iters)
+        int& iters, double& total_compute, double& total_comm, double& total_mainloop)
 {
   CommunityVector pastComm, currComm, targetComm;
   GraphWeightVector vDegree;
@@ -449,7 +498,10 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
   GraphWeight prevMod = lower;
   GraphWeight currMod = -1.0;
   int numIters = 0;
+  
+  double compute_t0, compute_t1, comm_t0, comm_t1;
  
+  compute_t0 = MPI_Wtime();
   distInitLouvain(dg, pastComm, currComm, vDegree, clusterWeight, localCinfo, 
           localCupdate, constantForSecondTerm, me);
   targetComm.resize(nv);
@@ -463,13 +515,21 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
   double t0, t1;
   t0 = MPI_Wtime();
 #endif
+  compute_t1 = MPI_Wtime();
+  total_compute += (compute_t1 - compute_t0);
+
+  comm_t0 = MPI_Wtime();
   exchangeVertexReqs(dg, ssz, rsz, ssizes, rsizes, 
           svdata, rvdata, me, nprocs);
+  comm_t1 = MPI_Wtime();
+  total_comm += (comm_t1 - comm_t0);
 #ifdef DEBUG_PRINTF  
   t1 = MPI_Wtime();
   ofs << "Initial communication setup time: " << (t1 - t0) << std::endl;
 #endif
   
+  double loop_t0, loop_t1;
+  loop_t0 = MPI_Wtime();
   while(true) {
 #ifdef DEBUG_PRINTF  
     const double t2 = MPI_Wtime();
@@ -481,9 +541,14 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
     t0 = MPI_Wtime();
 #endif
 
+    comm_t0 = MPI_Wtime();
     fillRemoteCommunities(dg, me, nprocs, ssz, rsz, ssizes, 
             rsizes, svdata, rvdata, currComm, localCinfo, 
             remoteCinfo, remoteComm, remoteCupdate);
+    comm_t1 = MPI_Wtime();
+    total_comm += (comm_t1 - comm_t0);
+    fprintf(stderr, "After Communication");
+    PrintRssGBytes();
 
 #ifdef DEBUG_PRINTF  
     t1 = MPI_Wtime();
@@ -494,6 +559,7 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
 #ifdef DEBUG_PRINTF  
     t0 = MPI_Wtime();
 #endif
+    compute_t0 = MPI_Wtime();
 #pragma omp parallel \
     shared(clusterWeight, localCupdate, currComm, targetComm, \
         vDegree, localCinfo, remoteCinfo, remoteComm, pastComm, dg, remoteCupdate), \
@@ -513,6 +579,9 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
         }
     }
 
+    fprintf(stderr, "After computation");
+    PrintRssGBytes();
+
 #ifdef DEBUG_PRINTF  
     t1 = MPI_Wtime();
     ofs << "Iteration computation time: " << (t1 - t0) << std::endl;
@@ -527,14 +596,23 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
 #ifdef DEBUG_PRINTF  
     t0 = MPI_Wtime();
 #endif
+    compute_t1 = MPI_Wtime();
+    total_compute += compute_t1 - compute_t0;
+
+    comm_t0 = MPI_Wtime();
     updateRemoteCommunities(dg, localCinfo, remoteCupdate, me, nprocs);
+    comm_t1 = MPI_Wtime();
+    total_comm += comm_t1 - comm_t0;
 #ifdef DEBUG_PRINTF  
     t1 = MPI_Wtime();
     ofs << "Update remote communities communication time: " << (t1 - t0) << std::endl;
     t0 = MPI_Wtime();
 #endif
 
+    compute_t0 = MPI_Wtime();
     currMod = distComputeModularity(g, localCinfo, clusterWeight, constantForSecondTerm, me);
+    compute_t1 = MPI_Wtime();
+    total_compute += compute_t1 - compute_t0;
 
 #ifdef DEBUG_PRINTF  
     t1 = MPI_Wtime();
@@ -553,6 +631,7 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
     if (prevMod < lower)
         prevMod = lower;
 
+    compute_t0 = MPI_Wtime();
 #ifdef OMP_SCHEDULE_RUNTIME
 #pragma omp parallel for  \
     shared(pastComm, currComm, targetComm) \
@@ -569,12 +648,17 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
         targetComm[i] = tmp;
     }
 
+    compute_t1 = MPI_Wtime();
+    total_compute += compute_t1 - compute_t0;
+
 #ifdef DEBUG_PRINTF  
     t1 = MPI_Wtime();
     ofs << "Update local communities time: " << (t1 - t0) << std::endl;
     ofs << "Total iteration time: " << (t1 - t2) << std::endl;
 #endif
   };
+  loop_t1 = MPI_Wtime();
+  total_mainloop += loop_t1 - loop_t0;
 
   cvect = pastComm;
   iters = numIters;
@@ -597,12 +681,15 @@ GraphWeight distLouvainMethodWithColoring(const int me, const int nprocs, const 
         CommunityVector &cvect, const GraphWeight lower, const GraphWeight thresh, 
         int& iters)
 {
+#if 0
+  TODO(lhc): ignore
   // if no colors, then fall back to original distLouvain  
   if (numColor == 1) {
       ofs << "No color specified, executing non-color Louvain..." << std::endl;
       return distLouvainMethod(me, nprocs, dg, ssz, rsz, ssizes, 
               rsizes, svdata, rvdata, cvect, lower, thresh, iters);
   }
+#endif
     
   CommunityVector pastComm, currComm, targetComm; 
   GraphWeightVector vDegree;
@@ -792,12 +879,15 @@ GraphWeight distLouvainMethodWithColoring(const int me, const int nprocs, const 
         CommunityVector &cvect, const GraphWeight lower, const GraphWeight thresh, 
         int& iters, bool ETLocalOrRemote)
 {
+#if 0
+  TODO(lhc) ignore
   // if no colors, then fall back to original distLouvain  
   if (numColor == 1) {
       ofs << "No color specified, executing non-color Louvain..." << std::endl;
       return distLouvainMethod(me, nprocs, dg, ssz, rsz, ssizes, 
               rsizes, svdata, rvdata, cvect, lower, thresh, iters);
   }
+#endif
     
   CommunityVector pastComm, currComm, targetComm; 
   GraphWeightVector vDegree;
@@ -1021,12 +1111,17 @@ GraphWeight distLouvainMethodWithColoring(const int me, const int nprocs, const 
         CommunityVector &cvect, const GraphWeight lower, const GraphWeight thresh, 
         int& iters, GraphWeight ETDelta, bool ETLocalOrRemote)
 {
+#if 0
+  TODO(lhc): ignore
+  // if no colors, then fall back to original distLouvain  
+
   // if no colors, then fall back to original distLouvain  
   if (numColor == 1) {
       ofs << "No color specified, executing non-color Louvain..." << std::endl;
       return distLouvainMethod(me, nprocs, dg, ssz, rsz, ssizes, 
               rsizes, svdata, rvdata, cvect, lower, thresh, iters);
   }
+#endif
     
   CommunityVector pastComm, currComm, targetComm; 
   GraphWeightVector vDegree;
@@ -1274,12 +1369,15 @@ GraphWeight distLouvainMethodVertexOrder(const int me, const int nprocs, const D
         CommunityVector &cvect, const GraphWeight lower, const GraphWeight thresh, 
         int& iters)
 {
+#if 0
+  TODO(lhc): ignore
   // if no colors, then fall back to original distLouvain  
   if (numColor == 1) {
       ofs << "No color specified, executing non-color Louvain..." << std::endl;
       return distLouvainMethod(me, nprocs, dg, ssz, rsz, ssizes, 
               rsizes, svdata, rvdata, cvect, lower, thresh, iters);
   }
+#endif
     
   CommunityVector pastComm, currComm, targetComm; 
   GraphWeightVector vDegree;
@@ -1468,12 +1566,15 @@ GraphWeight distLouvainMethodVertexOrder(const int me, const int nprocs, const D
         CommunityVector &cvect, const GraphWeight lower, const GraphWeight thresh, 
         int& iters, bool ETLocalOrRemote)
 {
+
+#if 0
   // if no colors, then fall back to original distLouvain  
   if (numColor == 1) {
       ofs << "No color specified, executing non-color Louvain..." << std::endl;
       return distLouvainMethod(me, nprocs, dg, ssz, rsz, ssizes, 
               rsizes, svdata, rvdata, cvect, lower, thresh, iters);
   }
+#endif
     
   CommunityVector pastComm, currComm, targetComm; 
   GraphWeightVector vDegree;
@@ -1697,11 +1798,14 @@ GraphWeight distLouvainMethodVertexOrder(const int me, const int nprocs, const D
         int& iters, GraphWeight ETDelta, bool ETLocalOrRemote)
 {
   // if no colors, then fall back to original distLouvain  
+#if 0
+  // TODO(lhc): ignore
   if (numColor == 1) {
       ofs << "No color specified, executing non-color Louvain..." << std::endl;
       return distLouvainMethod(me, nprocs, dg, ssz, rsz, ssizes, 
               rsizes, svdata, rvdata, cvect, lower, thresh, iters);
   }
+#endif
     
   CommunityVector pastComm, currComm, targetComm; 
   GraphWeightVector vDegree;
@@ -1945,11 +2049,14 @@ GraphWeight distLouvainMethodWithColoringCommOpt(const int me, const int nprocs,
         int& iters)
 {
   // if no colors, then fall back to original distLouvain  
+#if 0
+  TODO(lhc): ignore
   if (numColor == 1) {
       ofs << "No color specified, executing non-color Louvain..." << std::endl;
       return distLouvainMethod(me, nprocs, dg, ssz, rsz, ssizes, 
               rsizes, svdata, rvdata, cvect, lower, thresh, iters);
   }
+#endif
     
   CommunityVector pastComm, currComm, targetComm; 
   GraphWeightVector vDegree;
@@ -2318,7 +2425,13 @@ void distExecuteLouvainIteration(const GraphElem i, const DistGraph &dg,
 	currCommIsLocal=false;
   }
 
+  //fprintf(stderr, "Before edge range construction\n");
+  //PrintRssGBytes();
+
   g.getEdgeRangeForVertex(i, e0, e1);
+  
+  //fprintf(stderr, "After edge range construction\n");
+  //PrintRssGBytes();
 
   if (e0 != e1) {
     clmap.insert(ClusterLocalMap::value_type(cc, 0));
@@ -2334,11 +2447,15 @@ void distExecuteLouvainIteration(const GraphElem i, const DistGraph &dg,
   else
     localTarget = cc;
 
+  //fprintf(stderr, "After local map counter construction\n");
+  //PrintRssGBytes();
+
    // is the Target Local?
-   if (localTarget >= base && localTarget < bound) {
-      targetCommIsLocal = true;
-   }
+  if (localTarget >= base && localTarget < bound) {
+     targetCommIsLocal = true;
+  }
   
+  // TODO(lhc): Update cluster information at here through atomics.
   // current and target comm are local - atomic updates to vectors
   if ((localTarget != cc) && (localTarget != -1) && currCommIsLocal && targetCommIsLocal) {
         
@@ -3315,6 +3432,7 @@ void exchangeVertexReqs(const DistGraph &dg, size_t &ssz, size_t &rsz,
   ssz = 0, rsz = 0;
 
   int pproc = 0;
+  // XXX(lhc): Compute the number of remote nodes for each host
   // TODO FIXME use OpenMP
   for (PartnerArray::const_iterator iter = parray.begin(); iter != parray.end(); iter++) {
     ssz += iter->size();

@@ -361,10 +361,6 @@ void send_newEdges(int me, int nprocs, DistGraph* &dg,
   for(it = newEdgesMap.begin(); it != newEdgesMap.end(); it++){
     int belongProc = dg->getOwner((it->first));
 
-#ifdef DEBUG_PRINTF    
-    ofs << "Proc : " << me << " Vertex: " << it->first << " Belongs to: " << belongProc << std::endl;
-#endif
-
     if(belongProc != me){ // Put not owned into send list
         EdgeVector& sendTo = parray[belongProc];
         NewEdge::iterator innerIt;

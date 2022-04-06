@@ -81,7 +81,7 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &d
         size_t &ssz, size_t &rsz, std::vector<GraphElem> &ssizes, 
         std::vector<GraphElem> &rsizes, std::vector<GraphElem> &svdata, 
         std::vector<GraphElem> &rvdata, CommunityVector &cvect, const GraphWeight lower,
-        const GraphWeight thresh, int& iters);
+        const GraphWeight thresh, int& iters, double&, double&, double&);
 
 GraphWeight distLouvainMethod(const int me, const int nprocs, const DistGraph &dg,
         size_t &ssz, size_t &rsz, std::vector<GraphElem> &ssizes, 

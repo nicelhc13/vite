@@ -68,6 +68,8 @@
 #include "compare.hpp"
 #include "utils.hpp"
 
+//#define PRINT_DIST_STATS 
+
 std::ofstream ofs;
 std::ofstream ofcks;
 
@@ -227,6 +229,8 @@ int main(int argc, char *argv[])
   std::vector<GraphElem> ssizes, rsizes, svdata, rvdata;
   size_t ssz = 0U, rsz = 0U;
   const GraphElem nv = dg->getTotalNumVertices();
+
+  double total_compute{0}, total_comm{0}, total_mainloop{0};
     
   // gather all communities in root
   std::vector<GraphElem> commAll, cvectAll;
@@ -363,8 +367,11 @@ int main(int argc, char *argv[])
                     svdata, rvdata, cvect, currMod, threshold, iters, ETDelta, false);
         }
         else {
+            // TODO(lhc):
+            // Target application.
             currMod = distLouvainMethod(me, nprocs, *dg, ssz, rsz, ssizes, rsizes, 
-                    svdata, rvdata, cvect, currMod, threshold, iters);
+                    svdata, rvdata, cvect, currMod, threshold, iters, total_compute,
+                    total_comm, total_mainloop);
         }
     }
     t0 = MPI_Wtime();
@@ -453,7 +460,7 @@ int main(int argc, char *argv[])
         if (thresholdScaling && !runOnePhase && phase < 10) {
             tex_1 = MPI_Wtime();
             currMod = distLouvainMethod(me, nprocs, *dg, ssz, rsz, ssizes, rsizes, 
-                    svdata, rvdata, cvect, currMod, 1.0E-6, iters);
+                    svdata, rvdata, cvect, currMod, 1.0E-6, iters, total_compute, total_comm, total_mainloop);
             tex_2 = MPI_Wtime();
             ptotal += (tex_2 - tex_1);
         }
@@ -523,18 +530,33 @@ int main(int argc, char *argv[])
   MPI_Reduce(&total, &tot_time, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
   double ctot_time = 0.0;
   MPI_Reduce(&ctime, &ctot_time, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+  std::cout << "Compute time:" << total_compute << "\n";
+
+  double total_compute_avg = 0.0, total_comm_avg = 0.0, total_mainloop_avg = 0.0;
+  MPI_Reduce(&total_compute, &total_compute_avg, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&total_comm, &total_comm_avg, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&total_mainloop, &total_mainloop_avg, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+  std::cout << "Compute time:" << total_compute << "\n";
   
   if(me == 0) {
 #if defined(DONT_CREATE_DIAG_FILES)
       std::cout << "-------------------------------------------------------" << std::endl;
       std::cout << "Average total time (secs.): " << (tot_time/nprocs) << std::endl;
       std::cout << "Average time for clustering (secs.): " << (ctot_time/nprocs) << std::endl;
+      std::cout << "computation," << (total_compute_avg/nprocs) << std::endl;
+      std::cout << "communication," << (total_comm_avg/nprocs) << std::endl;
+      std::cout << "mainloop," << (total_mainloop_avg/nprocs) << std::endl;
       std::cout << "TEPS: " << (double)teps/(double)(tot_time/nprocs) << std::endl;
       std::cout << "-------------------------------------------------------" << std::endl;
 #else
       ofs << "--------------------------------------------------------------" << std::endl;
       ofs<< "Average (over processes) total time (secs.): "<< (tot_time/nprocs)<<std::endl;
       ofs << "Average time for clustering (secs.): " << (ctot_time/nprocs) << std::endl;
+      ofs << "computation," << (total_compute_avg/nprocs) << std::endl;
+      ofs << "communication," << (total_comm_avg/nprocs) << std::endl;
+      ofs << "mainloop," << (total_mainloop_avg/nprocs) << std::endl;
       ofs<< "TEPS: " << (double)teps/(double)(tot_time/nprocs) <<std::endl;
       ofs << "--------------------------------------------------------------" << std::endl;
 #endif
